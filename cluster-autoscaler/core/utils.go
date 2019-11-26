@@ -18,10 +18,11 @@ package core
 
 import (
 	"fmt"
-	"k8s.io/apimachinery/pkg/types"
 	"math/rand"
 	"reflect"
 	"time"
+
+	"k8s.io/apimachinery/pkg/types"
 
 	appsv1 "k8s.io/api/apps/v1"
 	apiv1 "k8s.io/api/core/v1"
@@ -144,6 +145,9 @@ func filterOutExpendableAndSplit(unschedulableCandidates []*apiv1.Pod, expendabl
 func filterOutExpendablePods(pods []*apiv1.Pod, expendablePodsPriorityCutoff int) []*apiv1.Pod {
 	var result []*apiv1.Pod
 	for _, pod := range pods {
+		// zuiurs: 指定の Priority より高い Pod は result として返される
+		// 基本的には PriorityClassName を指定しなくても Priority Admission Controller によって 0 が設定される
+		// metrics server とか keystone-auth が system-node-critical とかが設定してあって 0 より高い値になっている
 		if pod.Spec.Priority == nil || int(*pod.Spec.Priority) >= expendablePodsPriorityCutoff {
 			result = append(result, pod)
 		}

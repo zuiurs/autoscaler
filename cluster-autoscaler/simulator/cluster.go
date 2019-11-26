@@ -135,16 +135,21 @@ candidateloop:
 
 // FindEmptyNodesToRemove finds empty nodes that can be removed.
 func FindEmptyNodesToRemove(candidates []*apiv1.Node, pods []*apiv1.Pod) []*apiv1.Node {
+	// zuiurs: Node 名とそれに属す Pod 一覧 (NodeInfo の中に入ってる) を返す
 	nodeNameToNodeInfo := scheduler_util.CreateNodeNameToInfoMap(pods, candidates)
 	result := make([]*apiv1.Node, 0)
 	for _, node := range candidates {
 		if nodeInfo, found := nodeNameToNodeInfo[node.Name]; found {
 			// Should block on all pods.
+			// zuiurs: Drain をしたときに退去される Pod の一覧を返す
+			// そういう Pod がないなら Empty として追加される
+			// DaemonSet とかだと退去されないからそういうのも出すため？
 			podsToRemove, err := FastGetPodsToMove(nodeInfo, true, true, nil)
 			if err == nil && len(podsToRemove) == 0 {
 				result = append(result, node)
 			}
 		} else {
+			// zuiurs: Pod を持たない Node はこちらで追加される
 			// Node without pods.
 			result = append(result, node)
 		}

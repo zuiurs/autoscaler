@@ -265,7 +265,7 @@ func (a *StaticAutoscaler) RunOnce(currentTime time.Time) errors.AutoscalerError
 			klog.Warningf("Failed to remove unregistered nodes: %v", err)
 		}
 		if removedAny {
-			klog.V(0).Infof("Some unregistered nodes were removed, skipping iteration")
+			//klog.V(0).Infof("Some unregistered nodes were removed, skipping iteration")
 			return nil
 		}
 	}
@@ -288,7 +288,7 @@ func (a *StaticAutoscaler) RunOnce(currentTime time.Time) errors.AutoscalerError
 		return errors.ToAutoscalerError(errors.CloudProviderError, err)
 	}
 	if fixedSomething {
-		klog.V(0).Infof("Some node group target size was fixed, skipping the iteration")
+		//klog.V(0).Infof("Some node group target size was fixed, skipping the iteration")
 		return nil
 	}
 
@@ -393,17 +393,22 @@ func (a *StaticAutoscaler) RunOnce(currentTime time.Time) errors.AutoscalerError
 		} else {
 			var err errors.AutoscalerError
 			a.processors.ScaleDownNodeProcessor.Reset()
+			// zuiurs: スケールダウン候補を一覧する
+			// どこかの NodeGroup に属していて、NodeGroup の ID とノード数のマップからそのノードの属すグループのサイズを引っ張ってきて MinSize に到達していなければ候補として返される
+			// つまり NodeGroup の Min に到達していない限りスケールダウン候補として返される
 			scaleDownCandidates, err = a.processors.ScaleDownNodeProcessor.GetScaleDownCandidates(
 				autoscalingContext, allNodes)
 			if err != nil {
 				klog.Error(err)
 				return err
 			}
+			// zuiurs: 特にフィルタリング的なことはせずに全ての Node を返す
 			podDestinations, err = a.processors.ScaleDownNodeProcessor.GetPodDestinationCandidates(autoscalingContext, allNodes)
 			if err != nil {
 				klog.Error(err)
 				return err
 			}
+			// zuiurs: nil を返す
 			temporaryNodes, err = a.processors.ScaleDownNodeProcessor.GetTemporaryNodes(allNodes)
 			if err != nil {
 				klog.Error(err)
@@ -411,10 +416,17 @@ func (a *StaticAutoscaler) RunOnce(currentTime time.Time) errors.AutoscalerError
 			}
 		}
 
+		// zuiurs: temporaryNodes は nil なので特に何もしない
 		tempNodesPerNodeGroup := getTempNodesPerNodeGroup(a.CloudProvider, temporaryNodes)
 
 		// We use scheduledPods (not originalScheduledPods) here, so artificial scheduled pods introduced by processors
 		// (e.g unscheduled pods with nominated node name) can block scaledown of given node.
+		// zuiurs:
+		//   allNodes: 全ての Node
+		//   podDestinations: 全ての Node
+		//   scaleDownCandidates: Min に到達していない全ての Node
+		//   scheduledPods: 稼働している Pod
+		//   tempNodesPerNodeGroup: 空の Map
 		typedErr := scaleDown.UpdateUnneededNodes(allNodes, podDestinations, scaleDownCandidates, scheduledPods, currentTime, pdbs, tempNodesPerNodeGroup)
 		if typedErr != nil {
 			scaleDownStatus.Result = status.ScaleDownError
@@ -430,6 +442,8 @@ func (a *StaticAutoscaler) RunOnce(currentTime time.Time) errors.AutoscalerError
 			}
 		}
 
+		// zuiurs: CoolDown 中なのかどうかの確認
+		// これが true ならここまでの unneed の洗い出し (計算し直し) をするだけ (消したりはしない)
 		scaleDownInCooldown := a.processorCallbacks.disableScaleDownForLoop ||
 			a.lastScaleUpTime.Add(a.ScaleDownDelayAfterAdd).After(currentTime) ||
 			a.lastScaleDownFailTime.Add(a.ScaleDownDelayAfterFailure).After(currentTime) ||
@@ -454,6 +468,7 @@ func (a *StaticAutoscaler) RunOnce(currentTime time.Time) errors.AutoscalerError
 
 			// We want to delete unneeded Node Groups only if there was no recent scale up,
 			// and there is no current delete in progress and there was no recent errors.
+			// zuiurs: NoOpNodeGroupManager なので何もしていない？ (nil, nil を返しているだけっぽい)
 			removedNodeGroups, err := a.processors.NodeGroupManager.RemoveUnneededNodeGroups(autoscalingContext)
 			if err != nil {
 				klog.Errorf("Error while removing unneeded node groups: %v", err)
@@ -461,6 +476,8 @@ func (a *StaticAutoscaler) RunOnce(currentTime time.Time) errors.AutoscalerError
 
 			scaleDownStart := time.Now()
 			metrics.UpdateLastTime(metrics.ScaleDown, scaleDownStart)
+			// zuiurs: ここで scaleDown を行う！
+			// 行うと言っても unneeded に入っているやつが対象なので、その中でさらに条件がマッチするやつだけが scaleDown される
 			scaleDownStatus, typedErr := scaleDown.TryToScaleDown(allNodes, originalScheduledPods, pdbs, currentTime, temporaryNodes, tempNodesPerNodeGroup)
 			metrics.UpdateDurationFromStart(metrics.ScaleDown, scaleDownStart)
 

@@ -416,13 +416,18 @@ func (sd *ScaleDown) UpdateUnneededNodes(
 
 	currentlyUnneededNodes := make([]*apiv1.Node, 0)
 	// Only scheduled non expendable pods and pods waiting for lower priority pods preemption can prevent node delete.
+	// zuiurs: PriorityClass とかを設定している Pod のみを絞り出す
 	nonExpendablePods := filterOutExpendablePods(pods, sd.context.ExpendablePodsPriorityCutoff)
 	nodeNameToNodeInfo := scheduler_util.CreateNodeNameToInfoMap(nonExpendablePods, destinationNodes)
 	utilizationMap := make(map[string]simulator.UtilizationInfo)
 
+	// zuiurs: 渡した Node は removable として判定する
+	// 予め scaleDown 構造体が持っている unremovable リストに与えられた Node が含まれていたらそれを削除して removable として扱うようにする
+	// allNodes を渡しているので全ての Node が removable として判定するようにしている
 	sd.updateUnremovableNodes(allNodes)
 	// Filter out nodes that were recently checked
 	filteredNodesToCheck := make([]*apiv1.Node, 0)
+	// zuiurs: ここも unremovable の更新。無視して良さそう
 	for _, node := range scaleDownCandidates {
 		if unremovableTimestamp, found := sd.unremovableNodes[node.Name]; found {
 			if unremovableTimestamp.After(timestamp) {
@@ -432,6 +437,7 @@ func (sd *ScaleDown) UpdateUnneededNodes(
 		}
 		filteredNodesToCheck = append(filteredNodesToCheck, node)
 	}
+	// zuiurs: 基本的に全ての Node が filteredNodesToCheck に入るはずなので skipped は 0 になるはず
 	skipped := len(scaleDownCandidates) - len(filteredNodesToCheck)
 	if skipped > 0 {
 		klog.V(1).Infof("Scale-down calculation: ignoring %v nodes unremovable in the last %v", skipped, sd.context.AutoscalingOptions.UnremovableNodeRecheckTimeout)
@@ -439,22 +445,28 @@ func (sd *ScaleDown) UpdateUnneededNodes(
 
 	// Phase1 - look at the nodes utilization. Calculate the utilization
 	// only for the managed nodes.
+	// zuiurs: PHASE1 で Node のリソース使用率を計算する
+	// リソース量的に消せそうな Node をリストアップする
 	for _, node := range filteredNodesToCheck {
 
 		// Skip nodes marked to be deleted, if they were marked recently.
 		// Old-time marked nodes are again eligible for deletion - something went wrong with them
 		// and they have not been deleted.
+		// zuiurs: 削除中となっている Node の taint は `ToBeDeletedByClusterAutoscaler`
+		// taint がつけられた時間が 5 分以内または 3 分以内なら true
 		if isNodeBeingDeleted(node, timestamp) {
 			klog.V(1).Infof("Skipping %s from delete considerations - the node is currently being deleted", node.Name)
 			continue
 		}
 
 		// Skip nodes marked with no scale down annotation
+		// zuiurs: cluster-autoscaler.kubernetes.io/scale-down-disabled: true となっていたらscaledown から除外する
 		if hasNoScaleDownAnnotation(node) {
 			klog.V(1).Infof("Skipping %s from delete consideration - the node is marked as no scale down", node.Name)
 			continue
 		}
 
+		// zuiurs: 対象 Node 情報を引く
 		nodeInfo, found := nodeNameToNodeInfo[node.Name]
 		if !found {
 			klog.Errorf("Node info for %s not found", node.Name)
@@ -468,31 +480,46 @@ func (sd *ScaleDown) UpdateUnneededNodes(
 		klog.V(4).Infof("Node %s - %s utilization %f", node.Name, utilInfo.ResourceName, utilInfo.Utilization)
 		utilizationMap[node.Name] = utilInfo
 
+		// zuiurs: UtilizationThreshold を超えていたらクラスタはいっぱいいっぱいなのでスキップする
+		// これは Autoscaler の `--scale-down-utilization-threshold` で渡されるもので Default では 0.5 になっている
 		if !sd.isNodeBelowUtilzationThreshold(node, utilInfo) {
 			klog.V(4).Infof("Node %s is not suitable for removal - %s utilization too big (%f)", node.Name, utilInfo.ResourceName, utilInfo.Utilization)
 			continue
 		}
+
+		// zuiurs: ここまで残ったやつが要らない Node として扱われる
 		currentlyUnneededNodes = append(currentlyUnneededNodes, node)
 	}
 
 	emptyNodes := make(map[string]bool)
 
+	// zuiurs: 名の通り Empty な Node 一覧を返す
+	// Min より小さい値にならないように現在の削除中 Node も考慮して返す
 	emptyNodesList := sd.getEmptyNodesNoResourceLimits(currentlyUnneededNodes, pods, len(currentlyUnneededNodes), tempNodesPerNodeGroup)
 	for _, node := range emptyNodesList {
 		emptyNodes[node.Name] = true
 	}
 
+	// zuiurs: PHASE1 で残った Node から Empty を取り除いたものを返す
 	currentlyUnneededNonEmptyNodes := make([]*apiv1.Node, 0, len(currentlyUnneededNodes))
 	for _, node := range currentlyUnneededNodes {
 		if !emptyNodes[node.Name] {
 			currentlyUnneededNonEmptyNodes = append(currentlyUnneededNonEmptyNodes, node)
 		}
 	}
+	// zuiurs: この段階で PHASE1 で洗い出した要らない Node が、空の Node と Pod がいる Node に分割される
+	// (厳密には違う気がするが Empty な Node は UtilizationThreshold を下回るはずだし emptyNode は currenctlyUnneededNodes の完全な部分集合になるはずそうなるはず)
 
 	// Phase2 - check which nodes can be probably removed using fast drain.
+	// zuiurs: sd 内の unneededNodes に入っているやつは candidates になるっぽいけど、それは一体どこで設定されているんだ
+	// 下の方 (つまり前回の RunOnce の結果を参照しているっぽい)
 	currentCandidates, currentNonCandidates := sd.chooseCandidates(currentlyUnneededNonEmptyNodes)
 
 	// Look for nodes to remove in the current candidates
+	// zuiurs: ここは Fast チェックが行われる
+	// ちゃんと調べていないけどこっちのほうが drain のシミュレーションのときに見る情報が雑 (OwnerReference を見なかったり)
+	// これで削除する Node が確定する
+	// nodesToRemove には削除する Node の情報と、それによってリスケする必要のある Pod の情報が返される
 	nodesToRemove, unremovable, newHints, simulatorErr := simulator.FindNodesToRemove(
 		currentCandidates, destinationNodes, nonExpendablePods, nil, sd.context.PredicateChecker,
 		len(currentCandidates), true, sd.podLocationHints, sd.usageTracker, timestamp, pdbs)
@@ -500,6 +527,8 @@ func (sd *ScaleDown) UpdateUnneededNodes(
 		return sd.markSimulationError(simulatorErr, timestamp)
 	}
 
+	// zuiurs: なんかよくわからないけど更に消せる Node を探すっぽい
+	// 時間あるときに読む
 	additionalCandidatesCount := sd.context.ScaleDownNonEmptyCandidatesCount - len(nodesToRemove)
 	if additionalCandidatesCount > len(currentNonCandidates) {
 		additionalCandidatesCount = len(currentNonCandidates)
@@ -529,10 +558,14 @@ func (sd *ScaleDown) UpdateUnneededNodes(
 		}
 	}
 
+	// zuiurs: 結局ここで Empty Node も ToRemove に追加される
 	for _, node := range emptyNodesList {
 		nodesToRemove = append(nodesToRemove, simulator.NodeToBeRemoved{Node: node, PodsToReschedule: []*apiv1.Pod{}})
 	}
 	// Update the timestamp map.
+	// zuiurs: ToRemove は全て scaleDown 構造体の unneededNodesList に追加される
+	// 新しい Node のときは RunOnce のときのタイムスタンプが入れられる
+	// 元から unneededNodesList に入っていたもののタイムスタンプは更新されない
 	result := make(map[string]time.Time)
 	unneededNodesList := make([]*apiv1.Node, 0, len(nodesToRemove))
 	for _, node := range nodesToRemove {
@@ -699,6 +732,7 @@ func (sd *ScaleDown) TryToScaleDown(allNodes []*apiv1.Node, pods []*apiv1.Pod, p
 	nodeDeletionDuration := time.Duration(0)
 	findNodesToRemoveDuration := time.Duration(0)
 	defer updateScaleDownMetrics(time.Now(), &findNodesToRemoveDuration, &nodeDeletionDuration)
+	// zuiurs: Master 以外の Node
 	nodesWithoutMaster := filterOutMasters(allNodes, pods)
 	candidates := make([]*apiv1.Node, 0)
 	readinessMap := make(map[string]bool)
@@ -719,6 +753,7 @@ func (sd *ScaleDown) TryToScaleDown(allNodes []*apiv1.Node, pods []*apiv1.Pod, p
 	nodeGroupSize := utils.GetNodeGroupSizeMap(sd.context.CloudProvider)
 	resourcesWithLimits := resourceLimiter.GetResources()
 	for _, node := range nodesWithoutMaster {
+		// zuiurs: 今まで計算してきた unneededNodes にいる Node を見つける
 		if val, found := sd.unneededNodes[node.Name]; found {
 
 			klog.V(2).Infof("%s was unneeded for %s", node.Name, currentTime.Sub(val).String())
@@ -729,15 +764,18 @@ func (sd *ScaleDown) TryToScaleDown(allNodes []*apiv1.Node, pods []*apiv1.Pod, p
 				continue
 			}
 
+			// zuiurs: Ready 状態を取得する
 			ready, _, _ := kube_util.GetReadinessState(node)
 			readinessMap[node.Name] = ready
 
 			// Check how long the node was underutilized.
+			// zuiurs: Ready な状態じゃない、または最初に Unneeded に入れられてから 10 分(default)たっていないやつは除外
 			if ready && !val.Add(sd.context.ScaleDownUnneededTime).Before(currentTime) {
 				continue
 			}
 
 			// Unready nodes may be deleted after a different time than underutilized nodes.
+			// zuiurs: Ready な状態じゃないやつは、Unneeded に入れられてから 20 分(default)たっていなければ除外
 			if !ready && !val.Add(sd.context.ScaleDownUnreadyTime).Before(currentTime) {
 				continue
 			}
@@ -760,17 +798,20 @@ func (sd *ScaleDown) TryToScaleDown(allNodes []*apiv1.Node, pods []*apiv1.Pod, p
 
 			tempNodesForNg := tempNodesPerNodeGroup[nodeGroup.Id()]
 			deletionsInProgress := sd.nodeDeletionTracker.GetDeletionsInProgress(nodeGroup.Id())
+			// zuiurs: ここらへんは消して Min 以下にならないかどうかの最終確認
 			if size-deletionsInProgress-tempNodesForNg <= nodeGroup.MinSize() {
 				klog.V(1).Infof("Skipping %s - node group min size reached", node.Name)
 				continue
 			}
 
+			// zuiurs: どんくらいリソースが減るか計算
 			scaleDownResourcesDelta, err := computeScaleDownResourcesDelta(sd.context.CloudProvider, node, nodeGroup, resourcesWithLimits)
 			if err != nil {
 				klog.Errorf("Error getting node resources: %v", err)
 				continue
 			}
 
+			// zuiurs: scaleDownResourcesLeft を見ればわかりそうだけど、多分どのくらい消していいかを保持してる
 			checkResult := scaleDownResourcesLeft.checkScaleDownDeltaWithinLimits(scaleDownResourcesDelta)
 			if checkResult.exceeded {
 				klog.V(4).Infof("Skipping %s - minimal limit exceeded for %v", node.Name, checkResult.exceededResources)
@@ -790,6 +831,7 @@ func (sd *ScaleDown) TryToScaleDown(allNodes []*apiv1.Node, pods []*apiv1.Pod, p
 	// Trying to delete empty nodes in bulk. If there are no empty nodes then CA will
 	// try to delete not-so-empty nodes, possibly killing some pods and allowing them
 	// to recreate on other nodes.
+	// zuiurs: 上で残った Node の中で Empty なやつは bulk で消す
 	emptyNodes := sd.getEmptyNodes(candidates, pods, sd.context.MaxEmptyBulkDelete, scaleDownResourcesLeft, tempNodesPerNodeGroup)
 	if len(emptyNodes) > 0 {
 		nodeDeletionStart := time.Now()
@@ -813,6 +855,7 @@ func (sd *ScaleDown) TryToScaleDown(allNodes []*apiv1.Node, pods []*apiv1.Pod, p
 	// Only scheduled non expendable pods are taken into account and have to be moved.
 	nonExpendablePods := filterOutExpendablePods(pods, sd.context.ExpendablePodsPriorityCutoff)
 	// We look for only 1 node so new hints may be incomplete.
+	// zuiurs: ここだと Fast チェックではなく Details チェック
 	nodesToRemove, _, _, err := simulator.FindNodesToRemove(candidates, nodesWithoutMaster, nonExpendablePods, sd.context.ListerRegistry,
 		sd.context.PredicateChecker, 1, false,
 		sd.podLocationHints, sd.usageTracker, time.Now(), pdbs)
@@ -827,14 +870,15 @@ func (sd *ScaleDown) TryToScaleDown(allNodes []*apiv1.Node, pods []*apiv1.Pod, p
 		scaleDownStatus.Result = status.ScaleDownNoNodeDeleted
 		return scaleDownStatus, nil
 	}
+	// zuiurs: 先頭のやつだけが削除される
 	toRemove := nodesToRemove[0]
 	utilization := sd.nodeUtilizationMap[toRemove.Node.Name]
 	podNames := make([]string, 0, len(toRemove.PodsToReschedule))
 	for _, pod := range toRemove.PodsToReschedule {
 		podNames = append(podNames, pod.Namespace+"/"+pod.Name)
 	}
-	klog.V(0).Infof("Scale-down: removing node %s, utilization: %v, pods to reschedule: %s", toRemove.Node.Name, utilization,
-		strings.Join(podNames, ","))
+	//klog.V(0).Infof("Scale-down: removing node %s, utilization: %v, pods to reschedule: %s", toRemove.Node.Name, utilization,
+	//	strings.Join(podNames, ","))
 	sd.context.LogRecorder.Eventf(apiv1.EventTypeNormal, "ScaleDown", "Scale-down: removing node %s, utilization: %v, pods to reschedule: %s",
 		toRemove.Node.Name, utilization, strings.Join(podNames, ","))
 
@@ -846,9 +890,12 @@ func (sd *ScaleDown) TryToScaleDown(allNodes []*apiv1.Node, pods []*apiv1.Pod, p
 	nodeDeletionDuration = time.Now().Sub(nodeDeletionStart)
 	sd.nodeDeletionTracker.SetNonEmptyNodeDeleteInProgress(true)
 
+	// zuiurs: 実際に削除を行う関数
 	go func() {
 		// Finishing the delete process once this goroutine is over.
 		var result status.NodeDeleteResult
+		// zuiurs: 最終結果を格納する
+		// ここらへんを見て次 delete を実行するかとかを決めていそう
 		defer func() { sd.nodeDeletionTracker.AddNodeDeleteResult(toRemove.Node.Name, result) }()
 		defer sd.nodeDeletionTracker.SetNonEmptyNodeDeleteInProgress(false)
 		nodeGroup, found := candidateNodeGroups[toRemove.Node.Name]
@@ -904,7 +951,7 @@ func (sd *ScaleDown) getEmptyNodesNoResourceLimits(candidates []*apiv1.Node, pod
 // that can be deleted at the same time.
 func (sd *ScaleDown) getEmptyNodes(candidates []*apiv1.Node, pods []*apiv1.Pod, maxEmptyBulkDelete int,
 	resourcesLimits scaleDownResourcesLimits, temporaryNodesPerNodeGroup map[string]int) []*apiv1.Node {
-
+	// zuiurs: Pod が乗っていない or Pod が乗っていても drain で退去されるような Pod ではない Node を洗い出す
 	emptyNodes := simulator.FindEmptyNodesToRemove(candidates, pods)
 	availabilityMap := make(map[string]int)
 	result := make([]*apiv1.Node, 0)
@@ -930,12 +977,15 @@ func (sd *ScaleDown) getEmptyNodes(candidates []*apiv1.Node, pods []*apiv1.Pod, 
 			}
 			tempNodes := temporaryNodesPerNodeGroup[nodeGroup.Id()]
 			deletionsInProgress := sd.nodeDeletionTracker.GetDeletionsInProgress(nodeGroup.Id())
+			// zuiurs: <NodeGroup のサイズ> - <NodeGroup の最小サイズ> - <削除中の Node> - <tempNodes?>
 			available = size - nodeGroup.MinSize() - deletionsInProgress - tempNodes
 			if available < 0 {
 				available = 0
 			}
 			availabilityMap[nodeGroup.Id()] = available
 		}
+		// zuiurs: 削除を始めたときに Min を下回らないように available を確認しながら Empty 判定する
+		// Empty でも Min を下回る削除はしてはいけない
 		if available > 0 {
 			resourcesDelta, err := computeScaleDownResourcesDelta(sd.context.CloudProvider, node, nodeGroup, resourcesNames)
 			if err != nil {
@@ -963,7 +1013,7 @@ func (sd *ScaleDown) scheduleDeleteEmptyNodes(emptyNodes []*apiv1.Node, client k
 	candidateNodeGroups map[string]cloudprovider.NodeGroup) ([]*apiv1.Node, errors.AutoscalerError) {
 	deletedNodes := []*apiv1.Node{}
 	for _, node := range emptyNodes {
-		klog.V(0).Infof("Scale-down: removing empty node %s", node.Name)
+		//klog.V(0).Infof("Scale-down: removing empty node %s", node.Name)
 		sd.context.LogRecorder.Eventf(apiv1.EventTypeNormal, "ScaleDownEmpty", "Scale-down: removing empty node %s", node.Name)
 		simulator.RemoveNodeFromTracker(sd.usageTracker, node.Name, sd.unneededNodes)
 		nodeGroup, found := candidateNodeGroups[node.Name]
@@ -1023,6 +1073,7 @@ func (sd *ScaleDown) deleteNode(node *apiv1.Node, pods []*apiv1.Pod,
 	deleteSuccessful := false
 	drainSuccessful := false
 
+	// zuiurs: ToBeDeletedByClusterAutoscaler の Taint を NoSchedule でつける
 	if err := deletetaint.MarkToBeDeleted(node, sd.context.ClientSet); err != nil {
 		sd.context.Recorder.Eventf(node, apiv1.EventTypeWarning, "ScaleDownFailed", "failed to mark the node as toBeDeleted/unschedulable: %v", err)
 		return status.NodeDeleteResult{ResultType: status.NodeDeleteErrorFailedToMarkToBeDeleted, Err: errors.ToAutoscalerError(errors.ApiCallError, err)}
@@ -1046,6 +1097,8 @@ func (sd *ScaleDown) deleteNode(node *apiv1.Node, pods []*apiv1.Pod,
 	sd.context.Recorder.Eventf(node, apiv1.EventTypeNormal, "ScaleDown", "marked the node as toBeDeleted/unschedulable")
 
 	// attempt drain
+	// zuiurs: drain を行って結果を待つ
+	// なので CloudProvider 側が発動する前に drain が完了するはず
 	evictionResults, err := drainNode(node, pods, sd.context.ClientSet, sd.context.Recorder, sd.context.MaxGracefulTerminationSec, MaxPodEvictionTime, EvictionRetryTime, PodEvictionHeadroom)
 	if err != nil {
 		return status.NodeDeleteResult{ResultType: status.NodeDeleteErrorFailedToEvictPods, Err: err, PodEvictionResults: evictionResults}
@@ -1057,7 +1110,7 @@ func (sd *ScaleDown) deleteNode(node *apiv1.Node, pods []*apiv1.Pod,
 	}
 
 	// attempt delete from cloud provider
-
+	// zuiurs: ここで初めて CloudProvider の削除処理が走る
 	if typedErr := deleteNodeFromCloudProvider(node, sd.context.CloudProvider, sd.context.Recorder, sd.clusterStateRegistry); typedErr != nil {
 		return status.NodeDeleteResult{ResultType: status.NodeDeleteErrorFailedToDelete, Err: typedErr}
 	}
