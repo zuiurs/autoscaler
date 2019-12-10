@@ -110,6 +110,8 @@ func initializeDefaultOptions(opts *AutoscalerOptions) error {
 		}
 		opts.EstimatorBuilder = estimatorBuilder
 	}
+	// zuiurs: Backoff の時間などの設定
+	// 上を遡る感じ大体 nil になっていそう
 	if opts.Backoff == nil {
 		opts.Backoff =
 			backoff.NewIdBasedExponentialBackoff(clusterstate.InitialNodeGroupBackoffDuration, clusterstate.MaxNodeGroupBackoffDuration, clusterstate.NodeGroupBackoffResetTimeout)

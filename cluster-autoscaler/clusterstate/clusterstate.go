@@ -545,6 +545,7 @@ func (csr *ClusterStateRegistry) updateReadinessStats(currentTime time.Time) {
 	perNodeGroup := make(map[string]Readiness)
 	total := Readiness{Time: currentTime}
 
+	// zuiurs: ここで各 Node の状態判定を行っている
 	update := func(current Readiness, node *apiv1.Node, ready bool) Readiness {
 		current.Registered++
 		if deletetaint.HasToBeDeletedTaint(node) {
@@ -688,6 +689,7 @@ func (csr *ClusterStateRegistry) UpdateScaleDownCandidates(nodes []*apiv1.Node, 
 }
 
 // GetStatus returns ClusterAutoscalerStatus with the current cluster autoscaler status.
+// zuiurs: ここで cm に関する色々情報をアップデートしている
 func (csr *ClusterStateRegistry) GetStatus(now time.Time) *api.ClusterAutoscalerStatus {
 	result := &api.ClusterAutoscalerStatus{
 		ClusterwideConditions: make([]api.ClusterAutoscalerCondition, 0),
@@ -758,6 +760,8 @@ func buildHealthStatusNodeGroup(isReady bool, readiness Readiness, acceptable Ac
 	return condition
 }
 
+// zuiurs: ここで cm の ScaleUp ステータスの文言を設定している
+// ScaleDown は別の関数で切られている
 func buildScaleUpStatusNodeGroup(isScaleUpInProgress bool, isSafeToScaleUp bool, readiness Readiness, acceptable AcceptableRange) api.ClusterAutoscalerCondition {
 	condition := api.ClusterAutoscalerCondition{
 		Type: api.ClusterAutoscalerScaleUp,
@@ -899,6 +903,9 @@ func updateLastTransition(oldStatus, newStatus *api.ClusterAutoscalerStatus) {
 	newStatus.NodeGroupStatuses = updatedNgStatuses
 }
 
+// zuiurs: LastTransitionTime を現在時刻で更新するのではなくて、
+// newConds の LastTransitionTime は最新の時間が入ってしまっているので、
+// 前回の状態と同じなら前回のタイムスタンプで上書きするという処理をしている
 func updateLastTransitionSingleList(oldConds, newConds []api.ClusterAutoscalerCondition) []api.ClusterAutoscalerCondition {
 	result := make([]api.ClusterAutoscalerCondition, 0)
 	// We have ~3 conditions, so O(n**2) is good enough

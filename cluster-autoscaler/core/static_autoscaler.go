@@ -219,6 +219,7 @@ func (a *StaticAutoscaler) RunOnce(currentTime time.Time) errors.AutoscalerError
 		return autoscalerError.AddPrefix("failed to build node infos for node groups: ")
 	}
 
+	// zuiurs: ConfigMap の Health 状態をここで更新する (cm の更新は行わずに内部の値だけ更新する)
 	typedErr = a.updateClusterState(allNodes, nodeInfosForGroups, currentTime)
 	if typedErr != nil {
 		return typedErr
@@ -282,6 +283,7 @@ func (a *StaticAutoscaler) RunOnce(currentTime time.Time) errors.AutoscalerError
 	// Check if there has been a constant difference between the number of nodes in k8s and
 	// the number of nodes on the cloud provider side.
 	// TODO: andrewskim - add protection for ready AWS nodes.
+	// zuiurs: ここで CloudProvider 側と Autoscaler 側の不整合を調整する
 	fixedSomething, err := fixNodeGroupSize(autoscalingContext, a.clusterStateRegistry, currentTime)
 	if err != nil {
 		klog.Errorf("Failed to fix node group sizes: %v", err)

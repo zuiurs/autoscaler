@@ -532,10 +532,13 @@ func removeOldUnregisteredNodes(unregisteredNodes []clusterstate.UnregisteredNod
 func fixNodeGroupSize(context *context.AutoscalingContext, clusterStateRegistry *clusterstate.ClusterStateRegistry, currentTime time.Time) (bool, error) {
 	fixed := false
 	for _, nodeGroup := range context.CloudProvider.NodeGroups() {
+		// zuiurs: incorrect な NodeGroup の情報を取ってくる
+		// ここの中で参照されている csr.incorrectNodeGroupSizes はどこか別のところで構築されてそう
 		incorrectSize := clusterStateRegistry.GetIncorrectNodeGroupSize(nodeGroup.Id())
 		if incorrectSize == nil {
 			continue
 		}
+		// zuiurs: 最初に違いが観測されてから MaxNodeProvisionTime 分の時間が経過したら Decrease する
 		if incorrectSize.FirstObserved.Add(context.MaxNodeProvisionTime).Before(currentTime) {
 			delta := incorrectSize.CurrentSize - incorrectSize.ExpectedSize
 			if delta < 0 {
@@ -619,6 +622,7 @@ func UpdateClusterStateMetrics(csr *clusterstate.ClusterStateRegistry) {
 	}
 	metrics.UpdateClusterSafeToAutoscale(csr.IsClusterHealthy())
 	readiness := csr.GetClusterReadiness()
+	// zuiurs: NotStarted は staring として解釈される
 	metrics.UpdateNodesCount(readiness.Ready, readiness.Unready+readiness.LongNotStarted, readiness.NotStarted, readiness.LongUnregistered, readiness.Unregistered)
 }
 

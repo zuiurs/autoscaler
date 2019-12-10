@@ -25,6 +25,7 @@ import (
 )
 
 // Backoff handles backing off executions.
+// zuiurs: Backoff の時間についてはここに定義してある
 type exponentialBackoff struct {
 	maxBackoffDuration     time.Duration
 	initialBackoffDuration time.Duration
@@ -66,6 +67,8 @@ func NewIdBasedExponentialBackoff(initialBackoffDuration time.Duration, maxBacko
 }
 
 // Backoff execution for the given node group. Returns time till execution is backed off.
+// zuiurs: ちゃんと読んでないけど最大は maxBackoffDuration で
+// そこに到達するまで倍々で増やしていく? (tcp のリトライの時間みたい)
 func (b *exponentialBackoff) Backoff(nodeGroup cloudprovider.NodeGroup, nodeInfo *schedulernodeinfo.NodeInfo, errorClass cloudprovider.InstanceErrorClass, errorCode string, currentTime time.Time) time.Time {
 	duration := b.initialBackoffDuration
 	key := b.nodeGroupKey(nodeGroup)
