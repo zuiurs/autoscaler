@@ -769,7 +769,7 @@ func (sd *ScaleDown) TryToScaleDown(allNodes []*apiv1.Node, pods []*apiv1.Pod, p
 			readinessMap[node.Name] = ready
 
 			// Check how long the node was underutilized.
-			// zuiurs: Ready な状態じゃない、または最初に Unneeded に入れられてから 10 分(default)たっていないやつは除外
+			// zuiurs: Ready な状態なやつは最初に Unneeded に入れられてから 10 分(default)たっていないやつだけ除外
 			if ready && !val.Add(sd.context.ScaleDownUnneededTime).Before(currentTime) {
 				continue
 			}

@@ -233,6 +233,7 @@ func (a *StaticAutoscaler) RunOnce(currentTime time.Time) errors.AutoscalerError
 
 	defer func() {
 		// Update status information when the loop is done (regardless of reason)
+		// zuiurs: ここで ConfigMap に書き込んでいる
 		if autoscalingContext.WriteStatusConfigMap {
 			status := a.clusterStateRegistry.GetStatus(currentTime)
 			utils.WriteStatusConfigMap(autoscalingContext.ClientSet, autoscalingContext.ConfigNamespace,
@@ -319,6 +320,7 @@ func (a *StaticAutoscaler) RunOnce(currentTime time.Time) errors.AutoscalerError
 	// todo: move split and append below to separate PodListProcessor
 	// Some unschedulable pods can be waiting for lower priority pods preemption so they have nominated node to run.
 	// Such pods don't require scale up but should be considered during scale down.
+	// zuiurs: Priority を見て Cutoff より低いと無視される。NomitedNode が指定されているものはいずれ Preemption されるので無視される
 	unschedulablePods, unschedulableWaitingForLowerPriorityPreemption := filterOutExpendableAndSplit(unschedulablePods, a.ExpendablePodsPriorityCutoff)
 
 	// we tread pods with nominated node-name as scheduled for sake of scale-up considerations
@@ -329,8 +331,10 @@ func (a *StaticAutoscaler) RunOnce(currentTime time.Time) errors.AutoscalerError
 		getUpcomingNodeInfos(a.clusterStateRegistry, nodeInfosForGroups))
 
 	// finally, filter out pods that are too "young" to safely be considered for a scale-up (delay is configurable)
+	// zuiurs: デフォルトは 0 秒なので Pending になった瞬間 unshedulable として認識される
 	unschedulablePodsToHelp = a.filterOutYoungPods(unschedulablePodsToHelp, currentTime)
 
+	// zuiurs: ToHelp が最終的な Unschedulable Pod
 	if len(unschedulablePodsToHelp) == 0 {
 		scaleUpStatus.Result = status.ScaleUpNotNeeded
 		klog.V(1).Info("No unschedulable pods")
@@ -338,6 +342,7 @@ func (a *StaticAutoscaler) RunOnce(currentTime time.Time) errors.AutoscalerError
 		scaleUpStatus.Result = status.ScaleUpNoOptionsAvailable
 		klog.V(1).Info("Max total nodes in cluster reached")
 	} else if allPodsAreNew(unschedulablePodsToHelp, currentTime) {
+		// zuiurs: すべての Pod が新しい場合はまた増えると予想して、次のイテレーションまで Scaleup しない
 		// The assumption here is that these pods have been created very recently and probably there
 		// is more pods to come. In theory we could check the newest pod time but then if pod were created
 		// slowly but at the pace of 1 every 2 seconds then no scale up would be triggered for long time.
@@ -370,6 +375,7 @@ func (a *StaticAutoscaler) RunOnce(currentTime time.Time) errors.AutoscalerError
 		}
 	}
 
+	// zuiurs: オプションで ScaleDown を無効化するのも可能
 	if a.ScaleDownEnabled {
 		pdbs, err := pdbLister.List()
 		if err != nil {

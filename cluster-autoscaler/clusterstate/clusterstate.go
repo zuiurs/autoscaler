@@ -940,6 +940,7 @@ func (csr *ClusterStateRegistry) GetUpcomingNodes() map[string]int {
 	defer csr.Unlock()
 
 	result := make(map[string]int)
+	// zuiurs: NodeGroups() は Heat のタグから読み込むので起動途中のノードも返ってくる
 	for _, nodeGroup := range csr.cloudProvider.NodeGroups() {
 		id := nodeGroup.Id()
 		readiness := csr.perNodeGroupReadiness[id]

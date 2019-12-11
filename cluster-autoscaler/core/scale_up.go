@@ -55,6 +55,7 @@ func computeScaleUpResourcesLeftLimits(
 	nodeInfos map[string]*schedulernodeinfo.NodeInfo,
 	nodesFromNotAutoscaledGroups []*apiv1.Node,
 	resourceLimiter *cloudprovider.ResourceLimiter) (scaleUpResourcesLimits, errors.AutoscalerError) {
+	// zuiurs: 全体リソース量を計算
 	totalCores, totalMem, errCoresMem := calculateScaleUpCoresMemoryTotal(nodeGroups, nodeInfos, nodesFromNotAutoscaledGroups)
 
 	var totalGpus map[string]int64
@@ -65,6 +66,7 @@ func computeScaleUpResourcesLeftLimits(
 
 	resultScaleUpLimits := make(scaleUpResourcesLimits)
 	for _, resource := range resourceLimiter.GetResources() {
+		// zuiurs: Limit は特に設定していないので int64 の最大値が返される
 		max := resourceLimiter.GetMax(resource)
 
 		// we put only actual limits into final map. No entry means no limit.
@@ -78,6 +80,8 @@ func computeScaleUpResourcesLeftLimits(
 				if errCoresMem != nil {
 					resultScaleUpLimits[resource] = scaleUpLimitUnknown
 				} else {
+					// zuiurs: max の方が多ければそれを totalCores で引いたものを返す
+					// それ以外は 0 、つまりスケールはできないという意味？
 					resultScaleUpLimits[resource] = computeBelowMax(totalCores, max)
 				}
 
@@ -111,6 +115,7 @@ func calculateScaleUpCoresMemoryTotal(
 	var coresTotal int64
 	var memoryTotal int64
 
+	// zuiurs: NodeGroup 全体のリソース量を coresTotal, memoryTotal に入れていく
 	for _, nodeGroup := range nodeGroups {
 		currentSize, err := nodeGroup.TargetSize()
 		if err != nil {
@@ -185,6 +190,7 @@ func computeBelowMax(total int64, max int64) int64 {
 func computeScaleUpResourcesDelta(cp cloudprovider.CloudProvider, nodeInfo *schedulernodeinfo.NodeInfo, nodeGroup cloudprovider.NodeGroup, resourceLimiter *cloudprovider.ResourceLimiter) (scaleUpResourcesDelta, errors.AutoscalerError) {
 	resultScaleUpDelta := make(scaleUpResourcesDelta)
 
+	// zuiurs: Node の実情報から取得する
 	nodeCPU, nodeMemory := getNodeInfoCoresAndMemory(nodeInfo)
 	resultScaleUpDelta[cloudprovider.ResourceNameCores] = nodeCPU
 	resultScaleUpDelta[cloudprovider.ResourceNameMemory] = nodeMemory
@@ -272,6 +278,7 @@ func ScaleUp(context *context.AutoscalingContext, processors *ca_processors.Auto
 	}
 	glogx.V(1).Over(loggingQuota).Infof("%v other pods are also unschedulable", -loggingQuota.Left())
 
+	// zuiurs: NodeGroup を持つ Node だけに絞る (Master を除外)
 	nodesFromNotAutoscaledGroups, err := filterOutNodesFromNotAutoscaledGroups(nodes, context.CloudProvider)
 	if err != nil {
 		return &status.ScaleUpStatus{Result: status.ScaleUpError}, err.AddPrefix("failed to filter out nodes which are from not autoscaled groups: ")
@@ -288,12 +295,14 @@ func ScaleUp(context *context.AutoscalingContext, processors *ca_processors.Auto
 			errCP)
 	}
 
+	// zuiurs: Resource 制限を設定する (具体的に設定してないのでほとんど空のmap が返ってくるかも？)
 	scaleUpResourcesLeft, errLimits := computeScaleUpResourcesLeftLimits(context.CloudProvider, nodeGroups, nodeInfos, nodesFromNotAutoscaledGroups, resourceLimiter)
 	if errLimits != nil {
 		return &status.ScaleUpStatus{Result: status.ScaleUpError}, errLimits.AddPrefix("Could not compute total resources: ")
 	}
 
 	upcomingNodes := make([]*schedulernodeinfo.NodeInfo, 0)
+	// zuiurs: 各 NodeGroup にいくつ新しいノードの数 (CloudProvider のターゲットから今のノード数を引く) があるかを返す
 	for nodeGroup, numberOfNodes := range clusterStateRegistry.GetUpcomingNodes() {
 		nodeTemplate, found := nodeInfos[nodeGroup]
 		if !found {
@@ -356,6 +365,7 @@ func ScaleUp(context *context.AutoscalingContext, processors *ca_processors.Auto
 			continue
 		}
 
+		// zuiurs: Node 1 台あたりいくつのリソースが増えるか取得
 		scaleUpResourcesDelta, err := computeScaleUpResourcesDelta(context.CloudProvider, nodeInfo, nodeGroup, resourceLimiter)
 		if err != nil {
 			klog.Errorf("Skipping node group %s; error getting node group resources: %v", nodeGroup.Id(), err)
@@ -375,6 +385,8 @@ func ScaleUp(context *context.AutoscalingContext, processors *ca_processors.Auto
 		}
 
 		// add list of pods which pass predicates to option
+		// zuiurs: NodeGroup に Pod をスケジューリングできるかどうか確認する
+		// スケジューリングできた Pod については下の処理で podsRemainUnschedulable から削除される
 		podsPassing, err := getPodsPassingPredicates(nodeGroup.Id())
 		if err != nil {
 			klog.V(4).Infof("Skipping node group %s; cannot compute pods passing predicates", nodeGroup.Id())
@@ -394,10 +406,15 @@ func ScaleUp(context *context.AutoscalingContext, processors *ca_processors.Auto
 		}
 
 		// mark that there is a scheduling option for pods which can be scheduled to node from currently analyzed node group
+		// zuiurs: ここで Passing したものは除外することによって最終的に Remain していないかどうか確認できる
+		// 結果的にはこのスライスが空になるのが理想
+		// これは UnschedulablePod のスライスから除外するわけではないので次の NodeGroup の Passing チェックでも
+		// すべての unschedulablePod が処理される (後半のNodeGroupになるほどPassing チェックされる Pod が減るわけではない)
 		for _, pod := range podsPassing {
 			delete(podsRemainUnschedulable, pod)
 		}
 
+		// zuiurs: どの Pod がどの NodeGroup に配置できないのかの情報を入れる
 		for pod, err := range podsNotPassing {
 			_, found := podsRemainUnschedulable[pod]
 			if found {
@@ -405,8 +422,11 @@ func ScaleUp(context *context.AutoscalingContext, processors *ca_processors.Auto
 			}
 		}
 
+		// zuiurs: podsPassing はここで expansionOptions に追加される必要がある
+		// 空だとこの ScaleOut は return される
 		if len(option.Pods) > 0 {
 			estimator := context.EstimatorBuilder(context.PredicateChecker)
+			// zuiurs: この NodeGroup が何台のスケールアップが必要かを格納する
 			option.NodeCount = estimator.Estimate(option.Pods, nodeInfo, upcomingNodes)
 			if option.NodeCount > 0 {
 				expansionOptions = append(expansionOptions, option)
@@ -417,6 +437,7 @@ func ScaleUp(context *context.AutoscalingContext, processors *ca_processors.Auto
 			klog.V(4).Infof("No pod can fit to %s", nodeGroup.Id())
 		}
 	}
+	// zuiurs: 上記はNodeGroupそれぞれに対して行われるので、この NodeGroup はこの Pod を追加することができる、みたいな情報になる
 
 	if len(expansionOptions) == 0 {
 		klog.V(1).Info("No expansion options")
@@ -425,6 +446,7 @@ func ScaleUp(context *context.AutoscalingContext, processors *ca_processors.Auto
 	}
 
 	// Pick some expansion option.
+	// zuiurs: デフォルトの strategy は random なので適当な NodeGroup の Option が一つ選ばれる
 	bestOption := context.ExpanderStrategy.BestOption(expansionOptions, nodeInfos)
 	if bestOption != nil && bestOption.NodeCount > 0 {
 		klog.V(1).Infof("Best option to resize: %s", bestOption.NodeGroup.Id())
@@ -435,6 +457,7 @@ func ScaleUp(context *context.AutoscalingContext, processors *ca_processors.Auto
 
 		newNodes := bestOption.NodeCount
 
+		// zuiurs: 起動途中のやつと新しく追加するやつをあわせて max に到達しないか確認
 		if context.MaxNodesTotal > 0 && len(nodes)+newNodes+len(upcomingNodes) > context.MaxNodesTotal {
 			klog.V(1).Infof("Capping size to max cluster total size (%d)", context.MaxNodesTotal)
 			newNodes = context.MaxNodesTotal - len(nodes) - len(upcomingNodes)
@@ -446,6 +469,7 @@ func ScaleUp(context *context.AutoscalingContext, processors *ca_processors.Auto
 		}
 
 		createNodeGroupResults := make([]nodegroups.CreateNodeGroupResult, 0)
+		// zuiurs: ここは NodeGroup が存在しない場合なので AutoProvisioning の実装？
 		if !bestOption.NodeGroup.Exist() {
 			oldId := bestOption.NodeGroup.Id()
 			createNodeGroupResult, err := processors.NodeGroupManager.CreateNodeGroup(context, bestOption.NodeGroup)
@@ -497,12 +521,15 @@ func ScaleUp(context *context.AutoscalingContext, processors *ca_processors.Auto
 		}
 
 		// apply upper limits for CPU and memory
+		// zuiurs: ResourceLimit に引っかかっていないか見る (本環境では Limit の制限はしていないので newNodes は変わらない)
+		// Limit がかかっていると最大限増やせる Node 数に切られる
 		newNodes, err = applyScaleUpResourcesLimits(context.CloudProvider, newNodes, scaleUpResourcesLeft, nodeInfo, bestOption.NodeGroup, resourceLimiter)
 		if err != nil {
 			return &status.ScaleUpStatus{Result: status.ScaleUpError, CreateNodeGroupResults: createNodeGroupResults}, err
 		}
 
 		targetNodeGroups := []cloudprovider.NodeGroup{bestOption.NodeGroup}
+		// zuiurs: デフォルト false,  balance-similar-node-groups オプションで変更可能
 		if context.BalanceSimilarNodeGroups {
 			similarNodeGroups, typedErr := processors.NodeGroupSetProcessor.FindSimilarNodeGroups(context, bestOption.NodeGroup, nodeInfos)
 			if typedErr != nil {
@@ -530,12 +557,14 @@ func ScaleUp(context *context.AutoscalingContext, processors *ca_processors.Auto
 				klog.V(1).Infof("Splitting scale-up between %v similar node groups: {%v}", len(targetNodeGroups), buffer.String())
 			}
 		}
+		// zuiurs: targetNodeGroups の中で増やす Node を分散する
 		scaleUpInfos, typedErr := processors.NodeGroupSetProcessor.BalanceScaleUpBetweenGroups(
 			context, targetNodeGroups, newNodes)
 		if typedErr != nil {
 			return &status.ScaleUpStatus{Result: status.ScaleUpError, CreateNodeGroupResults: createNodeGroupResults}, typedErr
 		}
 		klog.V(1).Infof("Final scale-up plan: %v", scaleUpInfos)
+		// zuiurs: NodeGroup ごとに scaleUpInfos があってそれぞれに対して scaleup を実行していく
 		for _, info := range scaleUpInfos {
 			typedErr := executeScaleUp(context, clusterStateRegistry, info, gpu.GetGpuTypeForMetrics(gpuLabel, availableGPUTypes, nodeInfo.Node(), nil), now)
 			if typedErr != nil {
@@ -583,6 +612,8 @@ func getPodsPredicatePassingCheckFunctions(
 
 		podsPassing := make([]*apiv1.Pod, 0)
 		podsNotPassing := make(map[*apiv1.Pod]status.Reasons)
+		// zuiurs: checker には unschedulable の Pod の状態が格納されているので、その情報を元に指定された Node にスケジューリングできるかどう確認する
+		// 指定された NodeGroup に乗らなかった情報は NotPassing として保存される
 		schedulableOnNode := checker.checkPodsSchedulableOnNode(nodeGroupId, nodeInfo)
 		for pod, err := range schedulableOnNode {
 			if err == nil {
@@ -729,6 +760,7 @@ func applyScaleUpResourcesLimits(
 		return 0, err
 	}
 
+	// zuiurs: delta は cpu, memory などのリソース名が key, その値が value
 	for resource, resourceDelta := range delta {
 		limit, limitFound := scaleUpResourcesLeft[resource]
 		if !limitFound {
