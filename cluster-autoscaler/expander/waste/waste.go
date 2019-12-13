@@ -35,6 +35,12 @@ func NewStrategy() expander.Strategy {
 }
 
 // BestOption Finds the option that wastes the least fraction of CPU and Memory
+// zuiurs:
+// スケジュールする Pod の合計 Request が 500m のとき
+// 2000m x1 の場合: 2000-500 / 2000 = 0.75
+// 1000m x2 の場合: 2000-500 / 2000 = 0.75
+// 1000m x1 の場合: 1000-500 / 1000 = 0.50 (2000m も必要なくて 1000m 1 台で十分な場合)
+// このように同じスコアになるのでノード数が少ないところ配置するとかではない
 func (l *leastwaste) BestOption(expansionOptions []expander.Option, nodeInfo map[string]*schedulernodeinfo.NodeInfo) *expander.Option {
 	var leastWastedScore float64
 	var leastWastedOptions []expander.Option

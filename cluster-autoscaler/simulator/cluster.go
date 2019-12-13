@@ -113,6 +113,7 @@ candidateloop:
 			unremovable = append(unremovable, node)
 			continue candidateloop
 		}
+		// zuiurs: Rescheduling 先の情報を取得
 		findProblems := findPlaceFor(node.Name, podsToRemove, destinationNodes, nodeNameToNodeInfo, predicateChecker, oldHints, newHints,
 			usageTracker, timestamp)
 

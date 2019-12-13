@@ -452,6 +452,7 @@ func (a *StaticAutoscaler) RunOnce(currentTime time.Time) errors.AutoscalerError
 
 		// zuiurs: CoolDown 中なのかどうかの確認
 		// これが true ならここまでの unneed の洗い出し (計算し直し) をするだけ (消したりはしない)
+		// ScaleDownDelayAfterAdd は 10 分、ScaleDownDelayAfterDelete は 0 分 (default)
 		scaleDownInCooldown := a.processorCallbacks.disableScaleDownForLoop ||
 			a.lastScaleUpTime.Add(a.ScaleDownDelayAfterAdd).After(currentTime) ||
 			a.lastScaleDownFailTime.Add(a.ScaleDownDelayAfterFailure).After(currentTime) ||
